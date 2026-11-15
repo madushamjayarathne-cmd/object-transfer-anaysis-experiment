@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Box labeling</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 1300px; margin: auto; padding: 1rem; color: #17212b; }
+    main { display: grid; grid-template-columns: minmax(0, 520px) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+    @media (max-width: 850px) { main { grid-template-columns: minmax(0, 1fr); } }
+    main > section { min-width: 0; }
+    .scroll { overflow-x: auto; }
+    canvas { display: block; width: 100%; height: auto; background: #eee; cursor: crosshair; touch-action: none; }
+    button, input, select { font: inherit; padding: 0.3rem 0.5rem; }
+    button { cursor: pointer; margin: 0.15rem 0.15rem 0.15rem 0; }
+    .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin: 0.4rem 0; }
+    .hint { color: #43505c; font-size: 0.9rem; }
+    .banner { padding: 0.4rem 0.6rem; border-radius: 4px; background: #fff3cd; }
+    .banner.saved { background: #d9f2dd; }
+    #message { color: #a02222; font-weight: bold; white-space: pre-wrap; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { border-bottom: 1px solid #ddd; padding: 0.2rem; text-align: left; }
+    tr.selected { background: #e8f0fe; }
+    td input[type=text] { width: 6.5rem; }
+    td input[type=number] { width: 4.8rem; }
+    input.bad { outline: 2px solid #c0392b; }
+  </style>
+</head>
+<body>
+  <h1>Review and correct boxes</h1>
+  <p class="hint">Boxes are in original pixel coordinates. Draw a box by dragging on the image using the
+    chosen class. Include only boxes for visible people and for the bottle or laptop; delete wrong
+    suggestions. A frame is only recorded when you press Save. Entity IDs must stay consistent within
+    a video (for example p1, p2, p3 for people; b1 or l1 for the transferred object).</p>
+  <main>
+    <section>
+      <div class="row">
+        <label>Video <select id="video"></select></label>
+        <span id="progress"></span>
+      </div>
+      <div class="row">
+        <button type="button" id="prev">&larr; Previous sample</button>
+        <button type="button" id="next">Next sample &rarr;</button>
+        <button type="button" id="nextUnreviewed">Next unreviewed</button>
+        <button type="button" id="nextNoObject">Next saved frame with no object box</button>
+      </div>
+      <p id="frameLabel"></p>
+      <canvas id="canvas" width="10" height="10"></canvas>
+    </section>
+    <section>
+      <div id="banner" class="banner"></div>
+      <div class="row">
+        <label>Draw class <select id="drawClass">
+          <option>bottle</option><option>laptop</option><option>person</option></select></label>
+        <button type="button" id="save">Save frame</button>
+        <button type="button" id="saveNext">Save and next unreviewed</button>
+      </div>
+      <p id="message" role="status"></p>
+      <div class="scroll"><table>
+        <thead><tr><th>Entity ID</th><th>Class</th><th>x min</th><th>y min</th><th>x max</th><th>y max</th>
+          <th>Occluded</th><th></th></tr></thead>
+        <tbody id="boxes"></tbody>
+      </table></div>
+      <p class="hint">Click a row to highlight its box. Mark partially hidden items as occluded.
+        Frames saved with no bottle or laptop box are used as "no object here" examples, so only leave the object unlabeled when it is truly not visible.</p>
+    </section>
+  </main>
+  <script>
+    const token = location.hash.slice(1);
+    const $ = id => document.getElementById(id);
+    const canvas = $("canvas"), ctx = canvas.getContext("2d");
+    const COLORS = {person: "#1f6feb", bottle: "#1a9e3f", laptop: "#e67e00"};
+    let videos = [], video = null, saved = {}, samples = [], sampleIndex = 0, frame = 0;
+    let boxes = [], selected = -1, image = null, dirty = false, source = "empty", loadId = 0;
+
+    async function getJson(url, options) {
+      const response = await fetch(url, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      return data;
+    }
+    const reviewed = f => Object.prototype.hasOwnProperty.call(saved, f);
+    function iou(a, b) {
+      const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
+      const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
+      if (w <= 0 || h <= 0) return 0;
+      const inter = w * h, area = x => (x.x_max - x.x_min) * (x.y_max - x.y_min);
+      return inter / (area(a) + area(b) - inter);
+    }
+    function prepareSuggestions(predictions) {
+      const result = predictions.sort((a, b) => b.confidence - a.confidence).map(p => ({
+        entity_id: "", class_name: p.class_name, occluded: false,
+        x_min: p.x_min, y_min: p.y_min, x_max: p.x_max, y_max: p.y_max,
+      }));
+      const framesSaved = Object.keys(saved).map(Number).sort((a, b) => Math.abs(a - frame) - Math.abs(b - frame));
+      const taken = new Set();
+      for (const box of result) {
+        if (box.class_name === "person") {
+          for (const f of framesSaved) {
+            const match = saved[f].filter(s => s.class_name === "person" && !taken.has(s.entity_id))
+              .map(s => [iou(box, s), s]).filter(x => x[0] >= 0.3).sort((a, b) => b[0] - a[0])[0];
+            if (match) { box.entity_id = match[1].entity_id; taken.add(box.entity_id); break; }
+          }
+        } else {
+          const id = video.defaults[box.class_name];
+          if (id && !taken.has(id)) { box.entity_id = id; taken.add(id); }
+        }
+      }
+      return result;
+    }
+    async function loadFrame() {
+      const id = ++loadId;
+      frame = samples[sampleIndex];
+      $("message").textContent = "";
+      const [predictions] = await Promise.all([
+        reviewed(frame) ? [] : getJson(`/api/prelabels?video=${video.id}&frame=${frame}`),
+        new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => { if (id === loadId) { image = img; canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; } resolve(); };
+          img.onerror = () => reject(new Error("Could not decode this frame."));
+          img.src = `/api/frame?video=${video.id}&frame=${frame}`;
+        }),
+      ]);
+      if (id !== loadId) return;
+      if (reviewed(frame)) { boxes = saved[frame].map(b => ({...b})); source = "saved"; }
+      else { boxes = prepareSuggestions(predictions); source = "model"; }
+      selected = -1; dirty = false;
+      render();
+    }
+    function render() {
+      drawCanvas();
+      $("frameLabel").textContent = `Frame ${frame} (sample ${sampleIndex + 1} of ${samples.length})`;
+      const done = samples.filter(reviewed).length;
+      $("progress").textContent = `${done} of ${samples.length} suggested frames saved`;
+      const banner = $("banner");
+      banner.className = source === "saved" ? "banner saved" : "banner";
+      banner.textContent = source === "saved" ? "Saved frame (edit and save again to change it)."
+        : "Not saved yet. Boxes shown are unverified model suggestions or empty: check every one, then Save.";
+      renderTable();
+    }
+    function renderTable() {
+      const body = $("boxes");
+      body.replaceChildren();
+      boxes.forEach((b, i) => {
+        const tr = document.createElement("tr");
+        if (i === selected) tr.className = "selected";
+        tr.onclick = () => { selected = i; render(); };
+        const cell = node => { const td = document.createElement("td"); td.append(node); tr.append(td); };
+        const id = document.createElement("input");
+        id.type = "text"; id.value = b.entity_id; id.setAttribute("aria-label", "Entity ID");
+        if (!b.entity_id) id.className = "bad";
+        id.oninput = () => { b.entity_id = id.value.trim(); dirty = true; id.className = b.entity_id ? "" : "bad"; drawOnly(); };
+        cell(id);
+        const cls = document.createElement("select");
+        for (const name of ["person", "bottle", "laptop"]) cls.add(new Option(name, name, false, name === b.class_name));
+        cls.onchange = () => { b.class_name = cls.value; dirty = true; drawOnly(); };
+        cell(cls);
+        for (const key of ["x_min", "y_min", "x_max", "y_max"]) {
+          const n = document.createElement("input");
+          n.type = "number"; n.step = "1"; n.value = Math.round(b[key]); n.setAttribute("aria-label", key);
+          n.onchange = () => { b[key] = Number(n.value); dirty = true; drawOnly(); };
+          cell(n);
+        }
+        const occ = document.createElement("input");
+        occ.type = "checkbox"; occ.checked = b.occluded; occ.setAttribute("aria-label", "Occluded");
+        occ.onchange = () => { b.occluded = occ.checked; dirty = true; drawOnly(); };
+        cell(occ);
+        const del = document.createElement("button");
+        del.type = "button"; del.textContent = "Delete";
+        del.onclick = e => { e.stopPropagation(); boxes.splice(i, 1); selected = -1; dirty = true; render(); };
+        cell(del);
+        body.append(tr);
+      });
+    }
+    function drawOnly() { drawCanvas(); }
+    function drawCanvas() {
+      if (!image) return;
+      ctx.drawImage(image, 0, 0);
+      const t = Math.max(3, canvas.width / 300);
+      boxes.forEach((b, i) => {
+        ctx.lineWidth = i === selected ? t * 2 : t;
+        ctx.strokeStyle = b.entity_id ? COLORS[b.class_name] : "#c0392b";
+        ctx.setLineDash(b.occluded ? [t * 3, t * 2] : []);
+        ctx.strokeRect(b.x_min, b.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
+        ctx.setLineDash([]);
+        ctx.font = `${t * 6}px sans-serif`;
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fillText(`${b.entity_id || "?"} ${b.class_name}`, b.x_min + t, Math.max(t * 6, b.y_min - t));
+      });
+    }
+    function confirmLeave() { return !dirty || confirm("Discard unsaved changes to this frame?"); }
+    async function go(index) {
+      if (index < 0 || index >= samples.length || !confirmLeave()) return;
+      sampleIndex = index;
+      try { await loadFrame(); } catch (e) { $("message").textContent = e.message; }
+    }
+    function nextUnreviewed() {
+      for (let k = 1; k <= samples.length; k++) {
+        const i = (sampleIndex + k) % samples.length;
+        if (!reviewed(samples[i])) return i;
+      }
+      return -1;
+    }
+    function nextNoObject() {
+      for (let k = 1; k <= samples.length; k++) {
+        const i = (sampleIndex + k) % samples.length;
+        const f = samples[i];
+        if (reviewed(f) && !saved[f].some(b => b.class_name !== "person")) return i;
+      }
+      return -1;
+    }
+    async function save(advance) {
+      const missing = boxes.findIndex(b => !b.entity_id);
+      if (missing >= 0) { $("message").textContent = "Give every box an entity ID (or delete it)."; return; }
+      try {
+        await getJson("/api/boxes", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-Review-Token": token},
+          body: JSON.stringify({video_id: video.id, frame_index: frame, boxes}),
+        });
+        saved[frame] = boxes.map(b => ({...b})); dirty = false; source = "saved";
+        render();
+        $("message").textContent = "";
+        if (advance) {
+          const i = nextUnreviewed();
+          if (i < 0) $("message").textContent = "Saved. All suggested frames in this video are saved.";
+          else await go(i);
+        }
+      } catch (e) { $("message").textContent = `Not saved: ${e.message}`; }
+    }
+    function pointer(event) {
+      const r = canvas.getBoundingClientRect();
+      const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+      const w = canvas.width * scale, h = canvas.height * scale;
+      const x = (event.clientX - r.left - (r.width - w) / 2) / scale;
+      const y = (event.clientY - r.top - (r.height - h) / 2) / scale;
+      return {x: Math.max(0, Math.min(canvas.width, x)), y: Math.max(0, Math.min(canvas.height, y))};
+    }
+    let drag = null;
+    canvas.onpointerdown = e => { canvas.setPointerCapture(e.pointerId); drag = {start: pointer(e), now: pointer(e)}; };
+    canvas.onpointermove = e => {
+      if (!drag) return;
+      drag.now = pointer(e);
+      drawCanvas();
+      ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.setLineDash([8, 6]);
+      ctx.strokeRect(drag.start.x, drag.start.y, drag.now.x - drag.start.x, drag.now.y - drag.start.y);
+      ctx.setLineDash([]);
+    };
+    canvas.onpointerup = e => {
+      if (!drag) return;
+      const a = drag.start, b = pointer(e); drag = null;
+      const box = {
+        entity_id: "", class_name: $("drawClass").value, occluded: false,
+        x_min: Math.round(Math.min(a.x, b.x)), y_min: Math.round(Math.min(a.y, b.y)),
+        x_max: Math.round(Math.max(a.x, b.x)), y_max: Math.round(Math.max(a.y, b.y)),
+      };
+      if (box.x_max - box.x_min < 4 || box.y_max - box.y_min < 4) { render(); return; }
+      box.entity_id = video.defaults[box.class_name] || "";
+      if (boxes.some(x => x.entity_id && x.entity_id === box.entity_id)) box.entity_id = "";
+      boxes.push(box); selected = boxes.length - 1; dirty = true; render();
+    };
+    async function selectVideo() {
+      video = videos.find(v => v.id === $("video").value);
+      samples = video.samples; sampleIndex = 0;
+      saved = await getJson(`/api/saved?video=${video.id}`);
+      const i = samples.findIndex(f => !reviewed(f));
+      sampleIndex = i < 0 ? 0 : i;
+      await loadFrame();
+    }
+    $("video").onchange = async () => {
+      if (!confirmLeave()) { $("video").value = video.id; return; }
+      try { await selectVideo(); } catch (e) { $("message").textContent = e.message; }
+    };
+    $("prev").onclick = () => go(sampleIndex - 1);
+    $("next").onclick = () => go(sampleIndex + 1);
+    $("nextUnreviewed").onclick = () => { const i = nextUnreviewed(); if (i >= 0) go(i); };
+    $("nextNoObject").onclick = () => {
+      const i = nextNoObject();
+      if (i < 0) $("message").textContent = "Every saved frame in this video has an object box.";
+      else go(i);
+    };
+    $("save").onclick = () => save(false);
+    $("saveNext").onclick = () => save(true);
+    window.onbeforeunload = e => { if (dirty) e.preventDefault(); };
+    (async () => {
+      try {
+        if (!token) throw new Error("Open the full URL printed by the server, including its token.");
+        videos = await getJson("/api/videos");
+        for (const v of videos) $("video").add(new Option(`${v.id} — ${v.name}`, v.id));
+        await selectVideo();
+      } catch (e) { $("message").textContent = `Cannot start: ${e.message}`; }
+    })();
+  </script>
+</body>
+</html>

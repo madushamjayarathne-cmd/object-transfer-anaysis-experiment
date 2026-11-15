@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+data/raw_videos/*
+!data/raw_videos/.gitkeep
+*.pt
+results/*
+!results/.gitkeep
+data/yolo/
+runs/

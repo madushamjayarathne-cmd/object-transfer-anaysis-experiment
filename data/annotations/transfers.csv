@@ -1,0 +1,12 @@
+video_id,event_id,object_id,giver_id,receiver_id,start_frame,end_frame,transfer_frame
+pilot_001,event_01,b1,p1,p2,30,63,52
+pilot_001,event_02,b1,p2,p3,94,158,126
+pilot_002,event_04,b1,p3,p1,0,36,11
+pilot_002,event_05,b1,p1,p2,46,101,64
+pilot_003,event_06,l1,p2,p3,0,30,20
+pilot_003,event_07,l1,p3,p1,33,93,58
+pilot_003,event_08,l1,p1,p2,93,150,125
+pilot_004,event_09,l1,p3,p1,0,40,13
+pilot_004,event_10,l1,p1,p2,45,95,66
+pilot_005,event_11,b2,p1,p3,0,43,13
+pilot_005,event_12,b2,p3,p2,59,111,77

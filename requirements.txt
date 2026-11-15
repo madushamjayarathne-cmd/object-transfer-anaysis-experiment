@@ -1,0 +1,10 @@
+ultralytics
+lap
+opencv-python
+mediapipe
+numpy
+pandas
+scikit-learn
+streamlit
+matplotlib
+pytest

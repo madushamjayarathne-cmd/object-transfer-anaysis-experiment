@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Handover review</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 1200px; margin: auto; padding: 1rem; color: #17212b; }
+    main { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(300px, 1fr); gap: 1.5rem; }
+    @media (max-width: 750px) { main { grid-template-columns: 1fr; } }
+    img { display: block; max-width: 100%; max-height: 65vh; margin: 1rem auto; background: #eee; }
+    input, select, button { font: inherit; padding: 0.4rem; }
+    input, select { box-sizing: border-box; max-width: 100%; }
+    label { display: block; margin-top: 0.8rem; }
+    label input, label select { display: block; width: 100%; }
+    button { cursor: pointer; margin: 0.25rem 0.25rem 0.25rem 0; }
+    input[type=range] { width: 100%; }
+    .hint { color: #43505c; font-size: 0.9rem; }
+    #message { color: #a02222; font-weight: bold; white-space: pre-wrap; }
+    ul { padding-left: 1.25rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Review a handover</h1>
+  <p>Use the original video frames. Do not copy model track IDs unless you have checked them.
+    No event is saved until you press “Save event”.</p>
+  <main>
+    <section>
+      <label>Video <select id="video"></select></label>
+      <p id="frameLabel"></p>
+      <img id="frame" alt="Selected video frame">
+      <input id="frameSlider" type="range" min="0" value="0" aria-label="Frame number">
+      <div>
+        <button type="button" id="back10">−10 frames</button>
+        <button type="button" id="back">−1</button>
+        <button type="button" id="forward">+1</button>
+        <button type="button" id="forward10">+10 frames</button>
+      </div>
+      <p class="hint">Frame indices start at zero. Time shown is approximate.</p>
+    </section>
+    <section>
+      <h2>New event</h2>
+      <p class="hint">Give each person and object a consistent anonymous ID within the video:
+        for example, person_01, person_02, bottle_01 or laptop_01. Do not use real names.
+        For multiple events involving the same object, reuse its ID.</p>
+      <form id="eventForm">
+        <label>Event ID <input name="event_id" value="event_01" required></label>
+        <label>Object ID <input name="object_id" placeholder="bottle_01" required></label>
+        <label>Giver ID <input name="giver_id" placeholder="person_01" required></label>
+        <label>Receiver ID <input name="receiver_id" placeholder="person_02" required></label>
+        <label>Start frame <input name="start_frame" type="number" min="0" required></label>
+        <button type="button" data-mark="start_frame">Use current frame for start</button>
+        <label>End frame <input name="end_frame" type="number" min="0" required></label>
+        <button type="button" data-mark="end_frame">Use current frame for end</button>
+        <label>Transfer frame (optional) <input name="transfer_frame" type="number" min="0"></label>
+        <button type="button" data-mark="transfer_frame">Use current frame for transfer</button>
+        <div><button type="submit">Save event</button></div>
+      </form>
+      <p id="message" role="status"></p>
+      <h2>Saved events for this video</h2>
+      <ul id="events"></ul>
+      <p class="hint">If a video has no handover, do not add an event. Review saved
+        rows in transfers.csv to correct or delete a mistake; edits are not automatic.</p>
+    </section>
+  </main>
+  <script>
+    const token = location.hash.slice(1);
+    const video = document.querySelector("#video");
+    const slider = document.querySelector("#frameSlider");
+    const frame = document.querySelector("#frame");
+    const label = document.querySelector("#frameLabel");
+    const message = document.querySelector("#message");
+    const form = document.querySelector("#eventForm");
+    let videos = [];
+    let events = [];
+    function currentVideo() { return videos.find(item => item.id === video.value); }
+    function showFrame() {
+      const current = currentVideo();
+      if (!current) return;
+      const number = Number(slider.value);
+      label.textContent = `Frame ${number} of ${current.frames - 1} (approximately ${(number / current.fps).toFixed(2)} s)`;
+      frame.src = `/api/frame?video=${encodeURIComponent(current.id)}&frame=${number}`;
+    }
+    frame.onerror = () => { message.textContent = "Could not decode this frame. Check the source video."; };
+    function showEvents() {
+      const list = document.querySelector("#events");
+      list.replaceChildren();
+      const matches = events.filter(item => item.video_id === video.value);
+      if (!matches.length) {
+        const item = document.createElement("li");
+        item.textContent = "No saved events. This does not mean the video has been reviewed.";
+        list.append(item);
+      }
+      for (const event of matches) {
+        const item = document.createElement("li");
+        item.textContent = `${event.event_id}: ${event.object_id}, ${event.giver_id} → ${event.receiver_id}, frames ${event.start_frame}–${event.end_frame}` +
+          (event.transfer_frame ? `, transfer ${event.transfer_frame}` : "");
+        list.append(item);
+      }
+    }
+    async function getJson(url, options) {
+      const response = await fetch(url, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      return data;
+    }
+    video.onchange = () => {
+      slider.max = currentVideo().frames - 1;
+      slider.value = 0;
+      for (const name of ["start_frame", "end_frame", "transfer_frame"]) form.elements[name].value = "";
+      message.textContent = "";
+      showFrame();
+      showEvents();
+    };
+    slider.oninput = showFrame;
+    for (const [id, delta] of [["back10", -10], ["back", -1], ["forward", 1], ["forward10", 10]]) {
+      document.querySelector(`#${id}`).onclick = () => {
+        slider.value = Math.max(0, Math.min(Number(slider.max), Number(slider.value) + delta));
+        showFrame();
+      };
+    }
+    document.querySelectorAll("[data-mark]").forEach(button => {
+      button.onclick = () => { form.elements[button.dataset.mark].value = slider.value; };
+    });
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      data.video_id = video.value;
+      try {
+        const saved = await getJson("/api/events", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-Review-Token": token},
+          body: JSON.stringify(data),
+        });
+        events.push(saved);
+        showEvents();
+        message.textContent = "Saved. Change the event ID before adding another event to this video.";
+      } catch (error) {
+        message.textContent = `Not saved: ${error.message}`;
+      }
+    };
+    (async () => {
+      try {
+        if (!token) throw new Error("Open the full URL printed by the server, including its token.");
+        [videos, events] = await Promise.all([getJson("/api/videos"), getJson("/api/events")]);
+        for (const item of videos) {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = `${item.id} — ${item.name}`;
+          video.append(option);
+        }
+        video.onchange();
+      } catch (error) {
+        message.textContent = `Cannot start: ${error.message}`;
+      }
+    })();
+  </script>
+</body>
+</html>
